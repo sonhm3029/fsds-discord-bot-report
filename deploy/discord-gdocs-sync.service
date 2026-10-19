@@ -1,0 +1,23 @@
+# systemd unit. Edit User and the two paths, then:
+#   sudo cp deploy/discord-gdocs-sync.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now discord-gdocs-sync
+[Unit]
+Description=Discord research reports -> Google Docs sync
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=CHANGE_ME
+WorkingDirectory=/opt/discord-bot-report
+EnvironmentFile=/opt/discord-bot-report/.env
+ExecStart=/opt/discord-bot-report/.venv/bin/python -m discord_gdocs_sync --config /opt/discord-bot-report/config.toml run
+Restart=always
+RestartSec=10
+# Hardening (the bot only needs to write its own data/ directory)
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

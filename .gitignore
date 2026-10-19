@@ -1,6 +1,19 @@
+# secrets and local runtime state
 .env
 *.env
+config.toml
+secrets/
+data/
+*.db
+*.db-journal
+
+# python
+.venv/
 __pycache__/
 *.pyc
-.venv/
+*.egg-info/
+.pytest_cache/
+build/
+dist/
 node_modules/
+client_secret*.json

@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discord-gdocs-sync"
+version = "0.1.0"
+description = "Sync Discord research-report threads into tabs of Google Docs"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.4,<3",
+    "google-auth>=2.30,<3",
+    "requests>=2.31,<3",
+    "python-dotenv>=1.0,<2",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+oauth = ["google-auth-oauthlib>=1.2,<2"]
+
+[project.scripts]
+discord-gdocs-sync = "discord_gdocs_sync.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

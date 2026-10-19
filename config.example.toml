@@ -1,0 +1,53 @@
+# Copy to config.toml and edit. config.toml is git-ignored.
+# The Discord bot token is NOT stored here: put DISCORD_TOKEN in .env (see .env.example).
+
+[settings]
+# Timezone used for timestamps and the date in tab titles.
+timezone = "Asia/Ho_Chi_Minh"
+
+# Tab title. Fields: {date} (when the report was posted), {title} (thread name), {student}.
+# Google limits tab titles to 50 characters; longer titles are cut.
+tab_title_format = "Report {date} - {title}"
+
+# Insert PNG/JPEG/GIF attachments into the doc as real images (Discord links expire after ~24h).
+embed_images = true
+
+# Safety net for missed gateway events: how often to compare Discord with the state DB.
+poll_interval_seconds = 120
+
+# Wait this long after the last message in a thread before syncing it (batches bursts).
+debounce_seconds = 15
+
+# Re-read every thread at least this often to pick up edits/deletions made while offline.
+full_resync_hours = 6
+
+# SQLite file mapping threads to tabs. Relative paths are relative to this file.
+state_path = "data/state.db"
+
+[google]
+# Service-account key (recommended) or an OAuth authorized-user token (see README).
+credentials_file = "secrets/google-credentials.json"
+
+# One block per student. The Google Doc must already exist and be shared with the service
+# account as Editor (sharing the parent Drive folder is enough). "channels" are the Discord
+# channels (text or forum) whose threads are the reports.
+#
+# Several students can share a channel (e.g. one channel per topic): a thread belongs to the
+# student who wrote its starter message (the report), identified by "users" (Discord user ids:
+# Developer Mode -> right-click the user -> Copy User ID). Threads started by anyone who is not
+# listed (e.g. the teacher's own threads) are skipped. If a channel belongs to a single student,
+# "users" can be left out and every thread in it is synced.
+# "topic" is only printed in each tab header.
+[[students]]
+name = "Sophie"
+topic = "KV-Cache Optimization"
+doc = "https://docs.google.com/document/d/REPLACE_WITH_SOPHIE_DOC_ID/edit"
+channels = [111111111111111111]
+users = [333333333333333333]
+
+[[students]]
+name = "Khoa"
+topic = "Visual Token Efficiency"
+doc = "https://docs.google.com/document/d/REPLACE_WITH_KHOA_DOC_ID/edit"
+channels = [222222222222222222]
+users = [444444444444444444]
