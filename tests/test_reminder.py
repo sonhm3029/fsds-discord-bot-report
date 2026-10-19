@@ -309,3 +309,132 @@ def test_failed_delivery_is_retried_and_not_marked_as_sent():
     asyncio.run(bot._maybe_remind(MON_21H))
     asyncio.run(bot._maybe_remind(MON_21H + dt.timedelta(minutes=1)))
     assert len(sent) == 2 and bot._state.get_kv("reminder_last_sent") is None
+
+
+# ---- posting in the topic channels (tagging the students) ----------------------------------------
+
+from unittest.mock import AsyncMock  # noqa: E402
+
+from discord_gdocs_sync.reminder import mentioned_ids, public_messages  # noqa: E402
+
+
+def test_public_messages_tag_missing_students_per_channel_and_skip_complete_channels():
+    cfg = make_cfg()
+    ann, bob, cid = (s.doc_id for s in cfg.students)
+    only_bob_missing = plan_reminder(
+        cfg, [item("Ann", ann, MON_21H - dt.timedelta(hours=1)), item("Cid", cid, MON_21H - dt.timedelta(hours=1))], MON_21H
+    )
+    msgs = public_messages(only_bob_missing)
+    assert list(msgs) == [500]                       # channel 600 is complete: no message
+    assert "<@12>" in msgs[500] and "<@11>" not in msgs[500]
+    assert "Nhắc report Thứ 2 19/10" in msgs[500]
+
+    all_missing = public_messages(plan_reminder(cfg, [], MON_21H))
+    assert "<@11> <@12>" in all_missing[500]
+    assert "Cid" in all_missing[600] and "<@" not in all_missing[600]   # no user id configured: named, not tagged
+    assert public_messages(plan_reminder(cfg, [item(s.name, s.doc_id, MON_21H) for s in cfg.students], MON_21H)) == {}
+
+
+def test_mentioned_ids():
+    assert mentioned_ids("hi <@11> <@12> and Cid, not <#500>") == [11, 12]
+
+
+def test_public_time_can_differ_from_the_private_one():
+    cfg = make_cfg(days=(0, 3))
+    at_18 = dt.time(18, 0)
+    six_pm = dt.datetime(2026, 10, 19, 11, 0, tzinfo=UTC)  # 18:00 in Asia/Ho_Chi_Minh
+    assert should_send(cfg, six_pm, None, at=at_18) is True
+    assert should_send(cfg, six_pm, None) is False      # the private summary still waits for 21:00
+
+
+def public_bot(**reminder):
+    bot = SyncBot(make_cfg(days=(0, 3), public=True, **reminder), engine=SimpleNamespace(), state=StateStore(":memory:"))
+    posted, plans = [], {"n": 0}
+
+    async def build_plan(now):
+        plans["n"] += 1
+        return plan_reminder(bot._cfg, [], now)
+
+    async def post(cid, text):
+        if cid in bot.fail_channels:
+            raise PermissionError("no send permission")
+        posted.append(cid)
+
+    bot.fail_channels, bot.build_plan, bot._post_public = set(), build_plan, post
+    return bot, posted, plans
+
+
+def test_public_post_is_off_by_default_and_never_posts_before_its_time():
+    bot, posted, _ = public_bot()
+    asyncio.run(bot._maybe_remind_public(MON_21H - dt.timedelta(minutes=1)))
+    assert posted == []
+    off = SyncBot(make_cfg(days=(0, 3)), engine=SimpleNamespace(), state=StateStore(":memory:"))
+    asyncio.run(off._maybe_remind_public(MON_21H))   # public = False
+    assert off._state.get_kv("public_done") is None
+
+
+def test_public_post_goes_to_each_channel_once_per_day():
+    bot, posted, plans = public_bot()
+    asyncio.run(bot._maybe_remind_public(MON_21H))
+    asyncio.run(bot._maybe_remind_public(MON_21H + dt.timedelta(minutes=1)))
+    assert sorted(posted) == [500, 600] and plans["n"] == 1   # second minute did not even rebuild the plan
+    asyncio.run(bot._maybe_remind_public(MON_21H + dt.timedelta(days=3)))   # Thursday
+    assert len(posted) == 4
+
+
+def test_public_failure_is_retried_for_the_failed_channel_only_and_logged_once(caplog):
+    bot, posted, _ = public_bot()
+    bot.fail_channels = {600}
+    asyncio.run(bot._maybe_remind_public(MON_21H))
+    assert posted == [500] and bot._state.get_kv("public_done") is None
+    bot._public_retry_at = 0
+    asyncio.run(bot._maybe_remind_public(MON_21H + dt.timedelta(minutes=6)))
+    assert posted == [500]                                               # 500 is not posted twice
+    assert sum("Could not post the reminder" in r.message for r in caplog.records) == 1
+    bot.fail_channels, bot._public_retry_at = set(), 0                   # permission fixed
+    asyncio.run(bot._maybe_remind_public(MON_21H + dt.timedelta(minutes=12)))
+    assert sorted(posted) == [500, 600] and bot._state.get_kv("public_done") == "2026-10-19"
+
+
+def test_a_manually_posted_channel_is_not_posted_again_by_the_schedule():
+    bot, posted, _ = public_bot()
+    bot._mark_public_sent(500, "2026-10-19")
+    asyncio.run(bot._maybe_remind_public(MON_21H))
+    assert posted == [600]
+
+
+def fake_channel(can_send):
+    ch = MagicMock(spec=discord.TextChannel)
+    ch.id, ch.name = 500, "topic-1"
+    ch.guild = SimpleNamespace(me=object())
+    ch.permissions_for = lambda member: SimpleNamespace(send_messages=can_send)
+    ch.send = AsyncMock()
+    return ch
+
+
+def test_post_public_mentions_only_the_tagged_students():
+    bot = SyncBot(make_cfg(public=True), engine=SimpleNamespace(), state=StateStore(":memory:"))
+    ch = fake_channel(True)
+    bot.get_channel = lambda cid: ch
+    asyncio.run(bot._post_public(500, "📢 chưa nộp: <@11> <@12> @everyone"))
+    (text,), kwargs = ch.send.await_args
+    allowed = kwargs["allowed_mentions"]
+    assert allowed.everyone is False and allowed.roles is False
+    assert sorted(u.id for u in allowed.users) == [11, 12]
+
+
+def test_post_public_explains_a_missing_send_permission():
+    bot = SyncBot(make_cfg(public=True), engine=SimpleNamespace(), state=StateStore(":memory:"))
+    ch = fake_channel(False)
+    bot.get_channel = lambda cid: ch
+    with pytest.raises(PermissionError, match="Send Messages"):
+        asyncio.run(bot._post_public(500, "x"))
+    ch.send.assert_not_awaited()
+
+
+def test_public_config_parsing():
+    rc = _parse_reminder({"enabled": True, "reviewer_ids": [5], "public": True, "public_at": "18:30"})
+    assert rc.public is True and rc.public_at == dt.time(18, 30)
+    assert _parse_reminder({}).public is False and _parse_reminder({}).public_at is None
+    with pytest.raises(ConfigError, match="public_at"):
+        _parse_reminder({"public_at": "6pm"})

@@ -25,7 +25,7 @@ from .discord_source import (
     snapshot_thread,
 )
 from .notify import DISCORD_LIMIT, split_message
-from .reminder import format_message, plan_reminder, should_send
+from .reminder import ReminderPlan, format_message, mentioned_ids, plan_reminder, public_messages, should_send
 from .reminder_source import collect_items
 from .state import StateStore
 from .sync import SyncEngine
@@ -56,6 +56,7 @@ class SyncBot(discord.Client):
         mode: str = "run",
         telegram=None,
         send: bool = False,
+        send_public: bool = False,
     ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True  # privileged: enable it in the Discord developer portal
@@ -66,6 +67,9 @@ class SyncBot(discord.Client):
         self._mode = mode
         self._telegram = telegram  # TelegramNotifier or None
         self._send = send
+        self._send_public = send_public
+        self._public_retry_at = 0.0
+        self._public_error_logged: set[tuple[int, str]] = set()
         self._watched = config.watched_channels()
         # Threads whose report author is not mapped to any student (e.g. the teacher's own threads).
         self._ignored: set[int] = set()
@@ -278,7 +282,7 @@ class SyncBot(discord.Client):
 
     # -- reminder ----------------------------------------------------------
 
-    async def build_reminder(self, now: dt.datetime) -> str:
+    async def build_plan(self, now: dt.datetime) -> ReminderPlan:
         items = []
         for cid in sorted(self._watched):
             channel = await self._channel(cid)
@@ -286,7 +290,58 @@ class SyncBot(discord.Client):
                 # Sending a list that wrongly accuses those students of not reporting would be worse.
                 raise RuntimeError(f"channel {cid} is not reachable; not building a reminder from partial data")
             items += await collect_items(channel, self._cfg, now)
-        return format_message(self._cfg, plan_reminder(self._cfg, items, now))
+        return plan_reminder(self._cfg, items, now)
+
+    async def build_reminder(self, now: dt.datetime) -> str:
+        return format_message(self._cfg, await self.build_plan(now))
+
+    async def _post_public(self, channel_id: int, text: str) -> None:
+        """Post in a topic channel, mentioning only the students named in the text."""
+        channel = await self._channel(channel_id)
+        if channel is None:
+            raise RuntimeError(f"channel {channel_id} is not reachable")
+        if not channel.permissions_for(channel.guild.me).send_messages:
+            raise PermissionError(
+                f"the bot may not send messages in #{channel.name}: give its role 'Send Messages' there"
+            )
+        mentions = discord.AllowedMentions(
+            everyone=False, roles=False, users=[discord.Object(id=i) for i in mentioned_ids(text)]
+        )
+        await channel.send(text, allowed_mentions=mentions)
+
+    def _mark_public_sent(self, channel_id: int, local_date: str) -> None:
+        self._state.set_kv(f"public_sent:{channel_id}", local_date)
+
+    async def _maybe_remind_public(self, now: dt.datetime | None = None) -> None:
+        rc = self._cfg.reminder
+        now = now or dt.datetime.now(dt.timezone.utc)
+        local_date = now.astimezone(self._cfg.tz).date().isoformat()
+        if not rc.public or self._state.get_kv("public_done") == local_date:
+            return
+        if not should_send(self._cfg, now, None, at=rc.public_at):
+            return
+        if time.monotonic() < self._public_retry_at:
+            return
+        messages = public_messages(await self.build_plan(now))
+        failed = 0
+        for cid, text in messages.items():
+            if self._state.get_kv(f"public_sent:{cid}") == local_date:
+                continue
+            try:
+                await self._post_public(cid, text)
+                self._mark_public_sent(cid, local_date)
+                log.info("Posted the report reminder in channel %s", cid)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                failed += 1
+                if (cid, local_date) not in self._public_error_logged:  # log once, then retry quietly
+                    self._public_error_logged.add((cid, local_date))
+                    log.error("Could not post the reminder in channel %s: %s", cid, exc)
+        if failed:
+            self._public_retry_at = time.monotonic() + 300  # try the failed channels again in 5 minutes
+        else:
+            self._state.set_kv("public_done", local_date)
 
     async def _deliver(self, text: str) -> bool:
         """Send to every configured channel; True if at least one succeeded."""
@@ -322,24 +377,45 @@ class SyncBot(discord.Client):
         rc = self._cfg.reminder
         log.info("Reminder enabled: %s at %s via %s", [d for d in rc.days], rc.remind_at, list(rc.channels))
         while True:
-            try:
-                await self._maybe_remind()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("Reminder failed; will retry in a minute")
+            for step in (self._maybe_remind, self._maybe_remind_public):
+                try:
+                    await step()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Reminder step %s failed; will retry in a minute", step.__name__)
             await asyncio.sleep(60)
 
     async def _reminder_once(self) -> None:
-        text = await self.build_reminder(dt.datetime.now(dt.timezone.utc))
+        now = dt.datetime.now(dt.timezone.utc)
+        plan = await self.build_plan(now)
+        text, public = format_message(self._cfg, plan), public_messages(plan)
         print(text)
-        if not self._send:
-            print("\n(preview only: nothing was sent. Run `reminder --send` to deliver it.)")
+        print("\n--- Messages that would be posted in the topic channels (students tagged):")
+        for cid, msg in public.items():
+            ch = self.get_channel(cid)
+            print(f"[#{ch.name if ch else cid}]\n{msg}\n")
+        if not public:
+            print("(none: everyone has reported)")
+        if not (self._send or self._send_public):
+            print("\n(preview only: nothing was sent. `reminder --send` sends the private summary,")
+            print(" `reminder --send-public` posts in the channels and tags the students.)")
             return
-        if await self._deliver(text):
-            print("\nSent.")
-        else:
-            self.failures.append(0)
+        if self._send:
+            if await self._deliver(text):
+                print("Private summary sent.")
+            else:
+                self.failures.append(0)
+        if self._send_public:
+            local_date = now.astimezone(self._cfg.tz).date().isoformat()
+            for cid, msg in public.items():
+                try:
+                    await self._post_public(cid, msg)
+                    self._mark_public_sent(cid, local_date)  # so the schedule does not post it again today
+                    print(f"Posted in channel {cid}.")
+                except Exception as exc:
+                    print(f"Could not post in channel {cid}: {exc}")
+                    self.failures.append(cid)
 
     # -- diagnostics -------------------------------------------------------
 

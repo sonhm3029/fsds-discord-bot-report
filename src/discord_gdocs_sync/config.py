@@ -47,6 +47,9 @@ class ReminderConfig:
     # beginning matches this regex (default: a day/month like 15/10, or the T2..T7 weekday code).
     report_pattern: str = r"(?i)\bT[2-7]\b|\d{1,2}/\d{1,2}"
     dm_user_id: int | None = None  # who gets the Discord DM; defaults to the first reviewer
+    # Also post in each topic channel, tagging that channel's students who have not reported.
+    public: bool = False
+    public_at: dt.time | None = None  # defaults to remind_at
 
 
 @dataclass(frozen=True)
@@ -215,10 +218,17 @@ def _parse_reminder(r: dict) -> ReminderConfig:
     if not days:
         raise ConfigError("[reminder] days is empty")
 
-    at = str(r.get("remind_at", "21:00")).strip()
-    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", at)
-    if not m:
-        raise ConfigError(f"[reminder] remind_at {at!r} must look like 21:00")
+    def parse_time(key: str, default: str | None) -> dt.time | None:
+        value = r.get(key, default)
+        if value is None:
+            return None
+        m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", str(value).strip())
+        if not m:
+            raise ConfigError(f"[reminder] {key} {str(value)!r} must look like 21:00")
+        return dt.time(int(m.group(1)), int(m.group(2)))
+
+    remind_at = parse_time("remind_at", "21:00")
+    public_at = parse_time("public_at", None)
 
     channels = tuple(r.get("channels", ["discord_dm"]))
     bad = [c for c in channels if c not in REMINDER_CHANNELS]
@@ -243,11 +253,13 @@ def _parse_reminder(r: dict) -> ReminderConfig:
     return ReminderConfig(
         enabled=enabled,
         days=days,
-        remind_at=dt.time(int(m.group(1)), int(m.group(2))),
+        remind_at=remind_at,
         channels=channels,
         reviewer_ids=reviewers,
         early_days=int(r.get("early_days", 1)),
         lookback_days=int(r.get("lookback_days", 14)),
         report_pattern=pattern,
         dm_user_id=dm_user if dm_user is not None else (reviewers[0] if reviewers else None),
+        public=bool(r.get("public", False)),
+        public_at=public_at,
     )

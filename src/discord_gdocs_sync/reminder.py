@@ -62,13 +62,13 @@ def plan_reminder(cfg: Config, items: list[ReportItem], now: dt.datetime) -> Rem
     )
 
 
-def should_send(cfg: Config, now: dt.datetime, last_sent: str | None) -> bool:
-    """True once per report day, from `remind_at` until midnight (survives restarts via last_sent)."""
+def should_send(cfg: Config, now: dt.datetime, last_sent: str | None, at: dt.time | None = None) -> bool:
+    """True once per report day, from `at` (default remind_at) until midnight; survives restarts."""
     local = now.astimezone(cfg.tz)
     rc = cfg.reminder
     return (
         local.weekday() in rc.days
-        and local.time() >= rc.remind_at
+        and local.time() >= (at or rc.remind_at)
         and last_sent != local.date().isoformat()
     )
 
@@ -107,3 +107,24 @@ def format_message(cfg: Config, plan: ReminderPlan) -> str:
     else:
         lines.append("💬 Không có report nào đang chờ bạn phản hồi.")
     return "\n".join(lines)
+
+
+def public_messages(plan: ReminderPlan) -> dict[int, str]:
+    """channel id -> message for the channel, tagging its students who have not reported.
+
+    Students without a configured Discord user id cannot be tagged, so they are named instead.
+    Channels where everyone has reported get no message.
+    """
+    by_channel: dict[int, list[StudentConfig]] = {}
+    for s in plan.missing:
+        by_channel.setdefault(s.channel_ids[0], []).append(s)
+    head = f"📢 Nhắc report {WEEKDAY_VI[plan.day.weekday()]} {plan.day:%d/%m}"
+    out: dict[int, str] = {}
+    for cid, students in by_channel.items():
+        who = " ".join(f"<@{s.user_ids[0]}>" if s.user_ids else s.name for s in students)
+        out[cid] = f"{head}\nCác bạn chưa nộp report hôm nay: {who}\nNhớ nộp trước hết ngày hôm nay nhé! 🙏"
+    return out
+
+
+def mentioned_ids(text: str) -> list[int]:
+    return [int(x) for x in re.findall(r"<@(\d+)>", text)]

@@ -111,6 +111,8 @@ Toàn bộ là đối chiếu tác giả và thời gian bằng code, **không d
 - *Đã nộp hôm nay* = có report đăng trong ngày, hoặc sớm tối đa `early_days` ngày (mặc định 1, vì có bạn nộp từ Chủ nhật cho thứ Hai).
 - *Bạn đã phản hồi* = có tin nhắn của bạn (`reviewer_ids`) trong thread của report, hoặc bạn dùng Reply của Discord vào tin đó. Mở thread mà chưa viết gì thì vẫn tính là chưa phản hồi. Bạn trả lời ngay trong channel mà không bấm Reply thì bot không biết.
 
+**Tag học viên ngay trong Discord:** đặt `public = true` thì bot còn đăng một tin trong channel của từng topic, tag các bạn của topic đó chưa nộp (không đăng nếu cả topic đã nộp đủ; bot chỉ tag đúng những người đó, không tag được `@everyone`). Giờ đăng là `public_at` (mặc định bằng `remind_at`), mỗi channel đăng nhiều nhất một lần mỗi ngày. Bot cần quyền **Send Messages** ở các channel đó. Tin này mọi người đều thấy, nên hãy xem thử bằng `reminder` rồi mới bật; có thể thử đăng một lần bằng `reminder --send-public`.
+
 **Cách bật:**
 1. Chọn nơi nhận trong `channels`:
    - `"discord_dm"`: bot nhắn riêng cho bạn, không cần thiết lập gì thêm (bạn phải cho phép tin nhắn riêng từ thành viên server).

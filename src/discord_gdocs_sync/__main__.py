@@ -3,7 +3,7 @@
     python -m discord_gdocs_sync [--config config.toml] run        # run continuously (default)
     python -m discord_gdocs_sync [--config config.toml] sync-once  # sync everything, then exit
     python -m discord_gdocs_sync [--config config.toml] check      # verify Google + Discord access
-    python -m discord_gdocs_sync [--config config.toml] reminder   # preview today's reminder (add --send to deliver)
+    python -m discord_gdocs_sync [--config config.toml] reminder   # preview today's reminder (--send / --send-public to deliver)
 """
 
 from __future__ import annotations
@@ -51,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="discord-gdocs-sync", description=__doc__.split("\n")[0])
     parser.add_argument("--config", default=os.environ.get("DGS_CONFIG", "config.toml"))
     parser.add_argument("command", nargs="?", choices=["run", "sync-once", "check", "reminder"], default="run")
-    parser.add_argument("--send", action="store_true", help="with 'reminder': actually deliver it")
+    parser.add_argument("--send", action="store_true", help="with 'reminder': send the private summary")
+    parser.add_argument("--send-public", action="store_true", help="with 'reminder': post in the topic channels, tagging students")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -87,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
         google_ok = _check_google(cfg, docs)
 
     state = StateStore(cfg.state_path)
-    bot = SyncBot(cfg, SyncEngine(cfg, docs, state), state, mode=mode, telegram=telegram, send=args.send)
+    bot = SyncBot(cfg, SyncEngine(cfg, docs, state), state, mode=mode, telegram=telegram, send=args.send, send_public=args.send_public)
     try:
         bot.run(token, log_handler=None)
     except discord.LoginFailure:

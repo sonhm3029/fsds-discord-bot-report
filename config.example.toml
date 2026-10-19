@@ -32,6 +32,10 @@ days = ["mon", "thu"]                 # report days (T2 and T5)
 remind_at = "21:00"                   # local time (settings.timezone)
 channels = ["discord_dm"]             # "discord_dm" and/or "telegram" (needs TELEGRAM_* in .env)
 reviewer_ids = [123456789012345678]   # your Discord user id: your replies count as "answered"
+# Also post in each topic channel, tagging that channel's students who have not reported (visible to
+# everyone, so try `reminder --send-public` once on purpose first). public_at defaults to remind_at.
+public = false
+# public_at = "18:00"
 early_days = 1                        # a report posted up to 1 day early still counts for the slot
 lookback_days = 14                    # older reports are not listed as waiting
 # A message by a student is a report if it has a thread, a non-image attachment, or its first
