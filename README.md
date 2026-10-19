@@ -98,6 +98,27 @@ Cập nhật phiên bản mới: `git pull && .venv/bin/pip install -e . && sudo
 
 Sau khi bot chạy, hỏi ChatGPT như "Đọc report mới nhất của Sophie trong Google Drive", "Tìm report mà mình bàn về giả thuyết KV-cache". Tên tab mặc định là `Report {ngày học viên đăng report} - {tên thread}` (đổi bằng `tab_title_format`, tối đa 50 ký tự theo giới hạn của Google); tên thread càng rõ nghĩa thì ChatGPT càng dễ tìm. Các tab luôn xếp theo thứ tự thời gian đăng, kể cả khi bot đồng bộ muộn một thread cũ. Mỗi tab có header chứa sinh viên, topic, link thread và id.
 
+## Nhắc nhở cuối ngày (Telegram / Discord DM)
+
+Vào các ngày report (mặc định T2 và T5), lúc `remind_at` (mặc định 21:00, tức 3 giờ trước nửa đêm), bot gửi cho bạn một tin gồm:
+- **Bạn nào chưa nộp report** hôm nay (nhóm theo topic);
+- **Report nào nộp rồi mà bạn chưa phản hồi** (có link tới thread/tin nhắn, kèm số ngày).
+
+Toàn bộ là đối chiếu tác giả và thời gian bằng code, **không dùng LLM**. Bot mở lại sau khi tắt thì vẫn gửi nếu hôm đó chưa gửi (không gửi hai lần).
+
+**Quy ước bot dùng để suy ra** (chỉnh trong mục `[reminder]` của `config.toml`):
+- Một tin của học viên là *report* nếu: đã có thread mở từ tin đó, hoặc có file đính kèm không phải ảnh (`.md`, `.pdf`…), hoặc phần đầu tin có ngày/tháng hay mã T2..T7 (`report_pattern`). Tin hỏi đáp thường và ảnh chụp màn hình không tính.
+- *Đã nộp hôm nay* = có report đăng trong ngày, hoặc sớm tối đa `early_days` ngày (mặc định 1, vì có bạn nộp từ Chủ nhật cho thứ Hai).
+- *Bạn đã phản hồi* = có tin nhắn của bạn (`reviewer_ids`) trong thread của report, hoặc bạn dùng Reply của Discord vào tin đó. Mở thread mà chưa viết gì thì vẫn tính là chưa phản hồi. Bạn trả lời ngay trong channel mà không bấm Reply thì bot không biết.
+
+**Cách bật:**
+1. Chọn nơi nhận trong `channels`:
+   - `"discord_dm"`: bot nhắn riêng cho bạn, không cần thiết lập gì thêm (bạn phải cho phép tin nhắn riêng từ thành viên server).
+   - `"telegram"`: mở @BotFather trên Telegram, gửi `/newbot` để lấy **token**; nhắn một câu bất kỳ cho bot vừa tạo; rồi mở `https://api.telegram.org/bot<TOKEN>/getUpdates` và lấy `chat` → `id`. Điền `TELEGRAM_BOT_TOKEN` và `TELEGRAM_CHAT_ID` vào `.env`.
+2. Điền `reviewer_ids` = Discord user id của bạn, đặt `enabled = true`.
+3. Xem thử không gửi: `.venv/bin/python -m discord_gdocs_sync reminder`; gửi thật để thử: thêm `--send`.
+4. Khởi động lại dịch vụ để bật lịch gửi tự động: `sudo systemctl restart discord-gdocs-sync`.
+
 ## Hành vi cần biết
 
 - **Sửa tin nhắn** → nội dung tab cập nhật (có ghi `edited …`). **Xóa tin nhắn** → tin nhắn biến mất khỏi tab (tab luôn phản ánh trạng thái hiện tại của Discord).

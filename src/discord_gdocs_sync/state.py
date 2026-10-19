@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS reports (
     synced_at       REAL    NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS reports_doc ON reports(doc_id);
+CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
 _COLUMNS = (
@@ -79,6 +80,16 @@ class StateStore:
     def delete(self, thread_id: int) -> None:
         with self._lock:
             self._db.execute("DELETE FROM reports WHERE thread_id = ?", (thread_id,))
+            self._db.commit()
+
+    def get_kv(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_kv(self, key: str, value: str) -> None:
+        with self._lock:
+            self._db.execute("INSERT OR REPLACE INTO kv (key, value) VALUES (?, ?)", (key, value))
             self._db.commit()
 
     def count(self) -> int:

@@ -3,6 +3,7 @@
     python -m discord_gdocs_sync [--config config.toml] run        # run continuously (default)
     python -m discord_gdocs_sync [--config config.toml] sync-once  # sync everything, then exit
     python -m discord_gdocs_sync [--config config.toml] check      # verify Google + Discord access
+    python -m discord_gdocs_sync [--config config.toml] reminder   # preview today's reminder (add --send to deliver)
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from dotenv import load_dotenv
 from .bot import SyncBot
 from .config import Config, ConfigError, load_config
 from .gdocs import DocsError, GoogleDocsClient, load_credentials
+from .notify import TelegramNotifier
 from .state import StateStore
 from .sync import SyncEngine
 
@@ -48,7 +50,8 @@ def _check_google(cfg: Config, docs: GoogleDocsClient) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="discord-gdocs-sync", description=__doc__.split("\n")[0])
     parser.add_argument("--config", default=os.environ.get("DGS_CONFIG", "config.toml"))
-    parser.add_argument("command", nargs="?", choices=["run", "sync-once", "check"], default="run")
+    parser.add_argument("command", nargs="?", choices=["run", "sync-once", "check", "reminder"], default="run")
+    parser.add_argument("--send", action="store_true", help="with 'reminder': actually deliver it")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -66,18 +69,25 @@ def main(argv: list[str] | None = None) -> int:
         if not token:
             raise ConfigError("DISCORD_TOKEN is not set (put it in .env or the environment)")
         creds = load_credentials(cfg.credentials_file)
+        telegram = None
+        wants_reminder = cfg.reminder.enabled or args.command == "reminder"
+        if wants_reminder and "telegram" in cfg.reminder.channels:
+            tg_token, tg_chat = os.environ.get("TELEGRAM_BOT_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+            if not (tg_token and tg_chat):
+                raise ConfigError("reminder uses Telegram: set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env")
+            telegram = TelegramNotifier(tg_token, tg_chat)
     except (ConfigError, ValueError, OSError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 2
 
     docs = GoogleDocsClient(creds)
-    mode = {"run": "run", "sync-once": "once", "check": "check"}[args.command]
+    mode = {"run": "run", "sync-once": "once", "check": "check", "reminder": "reminder"}[args.command]
     google_ok = True
     if mode == "check":
         google_ok = _check_google(cfg, docs)
 
     state = StateStore(cfg.state_path)
-    bot = SyncBot(cfg, SyncEngine(cfg, docs, state), state, mode=mode)
+    bot = SyncBot(cfg, SyncEngine(cfg, docs, state), state, mode=mode, telegram=telegram, send=args.send)
     try:
         bot.run(token, log_handler=None)
     except discord.LoginFailure:

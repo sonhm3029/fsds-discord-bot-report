@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -27,6 +28,27 @@ class StudentConfig:
     user_ids: tuple[int, ...] = ()
 
 
+DAY_NAMES = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+REMINDER_CHANNELS = ("telegram", "discord_dm")
+
+
+@dataclass(frozen=True)
+class ReminderConfig:
+    """End-of-day nudge: who has not reported yet, and which reports still wait for a reply."""
+
+    enabled: bool = False
+    days: tuple[int, ...] = (0, 3)  # report days, Monday=0 (Mon and Thu)
+    remind_at: dt.time = dt.time(21, 0)  # local time (settings.timezone)
+    channels: tuple[str, ...] = ("discord_dm",)
+    reviewer_ids: tuple[int, ...] = ()  # Discord ids whose replies count as "answered"
+    early_days: int = 1  # a report posted up to this many days before the report day still counts
+    lookback_days: int = 14  # only reports newer than this are listed as unanswered
+    # A top-level message with neither a thread nor a document attachment is a report only if its
+    # beginning matches this regex (default: a day/month like 15/10, or the T2..T7 weekday code).
+    report_pattern: str = r"(?i)\bT[2-7]\b|\d{1,2}/\d{1,2}"
+    dm_user_id: int | None = None  # who gets the Discord DM; defaults to the first reviewer
+
+
 @dataclass(frozen=True)
 class Config:
     students: tuple[StudentConfig, ...]
@@ -38,6 +60,7 @@ class Config:
     full_resync_hours: float = 6.0
     embed_images: bool = True
     tab_title_format: str = "Report {date} - {title}"
+    reminder: ReminderConfig = field(default_factory=ReminderConfig)
 
     @property
     def tz(self) -> ZoneInfo:
@@ -128,6 +151,7 @@ def load_config(path: str | Path) -> Config:
         full_resync_hours=float(settings.get("full_resync_hours", 6)),
         embed_images=bool(settings.get("embed_images", True)),
         tab_title_format=title_fmt,
+        reminder=_parse_reminder(raw.get("reminder", {})),
     )
 
 
@@ -180,3 +204,50 @@ def _check_unambiguous(students: list[StudentConfig]) -> None:
                 if uid in owner:
                     raise ConfigError(f"user {uid} is mapped to both {owner[uid]!r} and {s.name!r} in channel {cid}")
                 owner[uid] = s.name
+
+
+def _parse_reminder(r: dict) -> ReminderConfig:
+    days_raw = r.get("days", ["mon", "thu"])
+    try:
+        days = tuple(sorted({DAY_NAMES[str(d).strip().lower()[:3]] for d in days_raw}))
+    except KeyError as exc:
+        raise ConfigError(f"[reminder] days: unknown day {exc} (use mon, tue, wed, thu, fri, sat, sun)") from None
+    if not days:
+        raise ConfigError("[reminder] days is empty")
+
+    at = str(r.get("remind_at", "21:00")).strip()
+    m = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", at)
+    if not m:
+        raise ConfigError(f"[reminder] remind_at {at!r} must look like 21:00")
+
+    channels = tuple(r.get("channels", ["discord_dm"]))
+    bad = [c for c in channels if c not in REMINDER_CHANNELS]
+    if bad or not channels:
+        raise ConfigError(f"[reminder] channels must be a non-empty subset of {list(REMINDER_CHANNELS)}, got {list(channels)}")
+
+    try:
+        reviewers = tuple(int(x) for x in r.get("reviewer_ids", []))
+        dm_user = int(r["dm_user_id"]) if "dm_user_id" in r else None
+    except (TypeError, ValueError):
+        raise ConfigError("[reminder] reviewer_ids / dm_user_id must be numeric Discord user ids") from None
+
+    pattern = str(r.get("report_pattern", ReminderConfig.report_pattern))
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        raise ConfigError(f"[reminder] report_pattern is not a valid regex: {exc}") from None
+
+    enabled = bool(r.get("enabled", False))
+    if enabled and not reviewers:
+        raise ConfigError("[reminder] reviewer_ids is required (your Discord user id: replies from it count as answered)")
+    return ReminderConfig(
+        enabled=enabled,
+        days=days,
+        remind_at=dt.time(int(m.group(1)), int(m.group(2))),
+        channels=channels,
+        reviewer_ids=reviewers,
+        early_days=int(r.get("early_days", 1)),
+        lookback_days=int(r.get("lookback_days", 14)),
+        report_pattern=pattern,
+        dm_user_id=dm_user if dm_user is not None else (reviewers[0] if reviewers else None),
+    )

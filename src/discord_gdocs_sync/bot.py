@@ -10,6 +10,7 @@ Three mechanisms keep the docs current:
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import time
 from dataclasses import dataclass
@@ -23,6 +24,9 @@ from .discord_source import (
     archived_threads,
     snapshot_thread,
 )
+from .notify import DISCORD_LIMIT, split_message
+from .reminder import format_message, plan_reminder, should_send
+from .reminder_source import collect_items
 from .state import StateStore
 from .sync import SyncEngine
 
@@ -40,9 +44,19 @@ class _Pending:
 
 
 class SyncBot(discord.Client):
-    """mode: 'run' (forever), 'once' (sync everything, then exit) or 'check' (diagnose, then exit)."""
+    """mode: 'run' (forever), 'once' (sync everything, then exit), 'check' (diagnose, then exit)
+    or 'reminder' (build the reminder once, print it, send it only if send=True, then exit)."""
 
-    def __init__(self, config: Config, engine: SyncEngine, state: StateStore, *, mode: str = "run") -> None:
+    def __init__(
+        self,
+        config: Config,
+        engine: SyncEngine,
+        state: StateStore,
+        *,
+        mode: str = "run",
+        telegram=None,
+        send: bool = False,
+    ) -> None:
         intents = discord.Intents.default()
         intents.message_content = True  # privileged: enable it in the Discord developer portal
         super().__init__(intents=intents)
@@ -50,6 +64,8 @@ class SyncBot(discord.Client):
         self._engine = engine
         self._state = state
         self._mode = mode
+        self._telegram = telegram  # TelegramNotifier or None
+        self._send = send
         self._watched = config.watched_channels()
         # Threads whose report author is not mapped to any student (e.g. the teacher's own threads).
         self._ignored: set[int] = set()
@@ -88,10 +104,16 @@ class SyncBot(discord.Client):
             await self._diagnose()
             await self.close()
             return
+        if self._mode == "reminder":
+            await self._reminder_once()
+            await self.close()
+            return
         self._tasks = [
             asyncio.create_task(self._worker(), name="worker"),
             asyncio.create_task(self._poll_loop(), name="poll"),
         ]
+        if self._cfg.reminder.enabled and self._mode == "run":
+            self._tasks.append(asyncio.create_task(self._reminder_loop(), name="reminder"))
 
     async def close(self) -> None:
         current = asyncio.current_task()
@@ -253,6 +275,71 @@ class SyncBot(discord.Client):
                     queued += 1
         if full or queued:
             log.info("Scan queued %d thread(s)%s", queued, " (full)" if full else "")
+
+    # -- reminder ----------------------------------------------------------
+
+    async def build_reminder(self, now: dt.datetime) -> str:
+        items = []
+        for cid in sorted(self._watched):
+            channel = await self._channel(cid)
+            if channel is None:
+                # Sending a list that wrongly accuses those students of not reporting would be worse.
+                raise RuntimeError(f"channel {cid} is not reachable; not building a reminder from partial data")
+            items += await collect_items(channel, self._cfg, now)
+        return format_message(self._cfg, plan_reminder(self._cfg, items, now))
+
+    async def _deliver(self, text: str) -> bool:
+        """Send to every configured channel; True if at least one succeeded."""
+        rc = self._cfg.reminder
+        ok = False
+        for name in rc.channels:
+            try:
+                if name == "discord_dm":
+                    user = await self.fetch_user(rc.dm_user_id)
+                    for chunk in split_message(text, DISCORD_LIMIT):
+                        await user.send(chunk)
+                elif name == "telegram":
+                    if self._telegram is None:
+                        raise RuntimeError("Telegram is not configured (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)")
+                    await asyncio.to_thread(self._telegram.send, text)
+                ok = True
+                log.info("Reminder sent via %s", name)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error("Could not send the reminder via %s: %s", name, exc)
+        return ok
+
+    async def _maybe_remind(self, now: dt.datetime | None = None) -> None:
+        now = now or dt.datetime.now(dt.timezone.utc)
+        if not should_send(self._cfg, now, self._state.get_kv("reminder_last_sent")):
+            return
+        text = await self.build_reminder(now)
+        if await self._deliver(text):
+            self._state.set_kv("reminder_last_sent", now.astimezone(self._cfg.tz).date().isoformat())
+
+    async def _reminder_loop(self) -> None:
+        rc = self._cfg.reminder
+        log.info("Reminder enabled: %s at %s via %s", [d for d in rc.days], rc.remind_at, list(rc.channels))
+        while True:
+            try:
+                await self._maybe_remind()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Reminder failed; will retry in a minute")
+            await asyncio.sleep(60)
+
+    async def _reminder_once(self) -> None:
+        text = await self.build_reminder(dt.datetime.now(dt.timezone.utc))
+        print(text)
+        if not self._send:
+            print("\n(preview only: nothing was sent. Run `reminder --send` to deliver it.)")
+            return
+        if await self._deliver(text):
+            print("\nSent.")
+        else:
+            self.failures.append(0)
 
     # -- diagnostics -------------------------------------------------------
 
